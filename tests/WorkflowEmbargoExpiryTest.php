@@ -2,22 +2,22 @@
 
 namespace Symbiote\AdvancedWorkflow\Tests;
 
+use Exception;
 use SilverStripe\CMS\Model\SiteTree;
 use SilverStripe\Core\Config\Config;
 use SilverStripe\Dev\SapphireTest;
 use SilverStripe\ORM\DataObject;
 use SilverStripe\ORM\FieldType\DBDatetime;
-use SilverStripe\Translatable\Model\Translatable;
-use SilverStripe\Security\Member;
+use SilverStripe\ORM\ValidationException;
 use SilverStripe\Subsites\Extensions\SiteTreeSubsites;
+use SilverStripe\Translatable\Model\Translatable;
 use SilverStripe\Versioned\Versioned;
-use Symbiote\AdvancedWorkflow\DataObjects\WorkflowAction;
 use Symbiote\AdvancedWorkflow\DataObjects\WorkflowDefinition;
-use Symbiote\AdvancedWorkflow\DataObjects\WorkflowTransition;
+use Symbiote\AdvancedWorkflow\Extensions\WorkflowApplicable;
 use Symbiote\AdvancedWorkflow\Extensions\WorkflowEmbargoExpiryExtension;
 use Symbiote\AdvancedWorkflow\Services\WorkflowService;
-use Symbiote\QueuedJobs\Services\AbstractQueuedJob;
 use Symbiote\QueuedJobs\Services\QueuedJobService;
+use Terraformers\EmbargoExpiry\Extension\EmbargoExpiryExtension;
 
 /**
  * @author marcus@symbiote.com.au
@@ -27,35 +27,14 @@ class WorkflowEmbargoExpiryTest extends SapphireTest
 {
     protected static $fixture_file = 'WorkflowEmbargoExpiry.yml';
 
-    protected function setUp()
-    {
-        // Prevent failure if queuedjobs module isn't installed.
-        if (!class_exists(AbstractQueuedJob::class)) {
-            static::$fixture_file = '';
-            parent::setUp();
-            $this->markTestSkipped("This test requires queuedjobs");
-        }
-        parent::setUp();
-
-        DBDatetime::set_mock_now('2014-01-05 12:00:00');
-
-        // This doesn't play nicely with PHPUnit
-        Config::modify()->set(QueuedJobService::class, 'use_shutdown_function', false);
-    }
-
-    protected function tearDown()
-    {
-        DBDatetime::clear_mock_now();
-        parent::tearDown();
-    }
-
     /**
      * @var array
      */
     protected static $required_extensions = array(
         SiteTree::class => array(
+            WorkflowApplicable::class,
+            EmbargoExpiryExtension::class,
             WorkflowEmbargoExpiryExtension::class,
-            Versioned::class,
         ),
     );
 
@@ -70,11 +49,31 @@ class WorkflowEmbargoExpiryTest extends SapphireTest
     );
 
     /**
-     * Start a workflow for a page,
-     * this will set it into a state where a workflow is currently being processes
+     * @throws Exception
+     */
+    protected function setUp()
+    {
+        DBDatetime::set_mock_now('2014-01-05 12:00:00');
+
+        // This doesn't play nicely with PHPUnit
+        Config::modify()->set(QueuedJobService::class, 'use_shutdown_function', false);
+
+        parent::setUp();
+    }
+
+    protected function tearDown()
+    {
+        DBDatetime::clear_mock_now();
+
+        parent::tearDown();
+    }
+
+    /**
+     * Start a workflow for a page, this will set it into a state where a workflow is currently being processes
      *
-     * @param DataObject $obj
-     * @return DataObject
+     * @param DataObject|mixed $obj
+     * @return mixed
+     * @throws ValidationException
      */
     private function startWorkflow($obj)
     {
@@ -90,8 +89,9 @@ class WorkflowEmbargoExpiryTest extends SapphireTest
     /**
      * Start and finish a workflow which will publish the page immediately basically.
      *
-     * @param DataObject $obj
+     * @param DataObject|mixed $obj
      * @return DataObject
+     * @throws ValidationException
      */
     private function finishWorkflow($obj)
     {
@@ -126,20 +126,23 @@ class WorkflowEmbargoExpiryTest extends SapphireTest
      * Test when embargo and expiry are both empty.
      *
      * No jobs should be created, but page is published by the workflow action.
+     *
+     * @throws ValidationException
      */
     public function testEmptyEmbargoExpiry()
     {
+        /** @var SiteTree|EmbargoExpiryExtension $page */
         $page = $this->objFromFixture(SiteTree::class, 'emptyEmbargoExpiry');
         $page->Content = 'Content to go live';
 
-        $live = $this->getLive($page);
-
-        $this->assertEmpty($live->Content);
+        // This record should not yet be published.
+        $this->assertFalse($page->isPublished());
         $this->assertEquals(0, $page->PublishJobID);
         $this->assertEquals(0, $page->UnPublishJobID);
 
         $page = $this->finishWorkflow($page);
 
+        /** @var SiteTree|EmbargoExpiryExtension $live */
         $live = $this->getLive($page);
 
         $this->assertNotEmpty($live->Content);
@@ -148,341 +151,127 @@ class WorkflowEmbargoExpiryTest extends SapphireTest
     }
 
     /**
-     * Test for embargo in the past
+     * Test when both embargo and expiry dates are set.
      *
-     * Creates a publish job which is queued for immediately
-     */
-    public function testPastEmbargo()
-    {
-        $page = $this->objFromFixture(SiteTree::class, 'pastEmbargo');
-
-        $page = $this->finishWorkflow($page);
-
-        $this->assertNotEquals(0, $page->PublishJobID);
-        $this->assertEquals(0, $page->UnPublishJobID);
-
-        $publish = strtotime($page->PublishJob()->StartAfter);
-        $this->assertFalse($publish);
-    }
-
-    /**
-     * Test for expiry in the past
+     * Jobs should be created, and the page should not be published as part of the workflow action.
      *
-     * Creates an unpublish job which is queued for immediately
+     * @throws ValidationException
      */
-    public function testPastExpiry()
+    public function testProcessEmbargoExpiry()
     {
-        $page = $this->objFromFixture(SiteTree::class, 'pastExpiry');
+        /** @var SiteTree|EmbargoExpiryExtension $page */
+        $page = $this->objFromFixture(SiteTree::class, 'processEmbargoExpiry');
 
-        $page = $this->finishWorkflow($page);
+        $page->Content = 'Content to go live';
+        $page->DesiredPublishDate = '2014-01-06 12:00:00';
+        $page->DesiredUnPublishDate = '2014-01-08 12:00:00';
 
-        $this->assertEquals(0, $page->PublishJobID);
-        $this->assertNotEquals(0, $page->UnPublishJobID);
-
-        $unpublish = strtotime($page->UnPublishJob()->StartAfter);
-
-        $this->assertFalse($unpublish);
-    }
-
-    /**
-     * Test for embargo and expiry in the past
-     *
-     * Creates an unpublish job which is queued for immediately
-     */
-    public function testPastEmbargoExpiry()
-    {
-        $page = $this->objFromFixture(SiteTree::class, 'pastEmbargoExpiry');
-
-        $page = $this->finishWorkflow($page);
-
-        $this->assertEquals(0, $page->PublishJobID);
-        $this->assertNotEquals(0, $page->UnPublishJobID);
-
-        $unpublish = strtotime($page->UnPublishJob()->StartAfter);
-
-        $this->assertFalse($unpublish);
-    }
-
-    /**
-     * Test for embargo in the past and expiry in the future
-     *
-     * Creates a publish job which is queued for immediately and an unpublish job which is queued for later
-     */
-    public function testPastEmbargoFutureExpiry()
-    {
-        $page = $this->objFromFixture(SiteTree::class, 'pastEmbargoFutureExpiry');
-
-        $page = $this->finishWorkflow($page);
-
-        $this->assertNotEquals(0, $page->PublishJobID);
-        $this->assertNotEquals(0, $page->UnPublishJobID);
-
-        $publish = strtotime($page->PublishJob()->StartAfter);
-        $unpublish = strtotime($page->UnPublishJob()->StartAfter);
-
-        $this->assertFalse($publish);
-        $this->assertNotFalse($unpublish);
-    }
-
-    /**
-     * Test for embargo and expiry in the future
-     *
-     * Creates a publish and unpublish job which are queued for immediately
-     */
-    public function testFutureEmbargoExpiry()
-    {
-        $page = $this->objFromFixture(SiteTree::class, 'futureEmbargoExpiry');
-
-        $page = $this->finishWorkflow($page);
-
-        $this->assertNotEquals(0, $page->PublishJobID);
-        $this->assertNotEquals(0, $page->UnPublishJobID);
-
-        $publish = strtotime($page->PublishJob()->StartAfter);
-        $unpublish = strtotime($page->UnPublishJob()->StartAfter);
-
-        $this->assertNotFalse($publish);
-        $this->assertNotFalse($unpublish);
-    }
-
-    /**
-     * Test for embargo after expiry in the past
-     *
-     * No jobs should be created, invalid option
-     */
-    public function testPastEmbargoAfterExpiry()
-    {
-        $page = $this->objFromFixture(SiteTree::class, 'pastEmbargoAfterExpiry');
-
-        $page = $this->finishWorkflow($page);
-
-        $this->assertEquals(0, $page->PublishJobID);
-        $this->assertEquals(0, $page->UnPublishJobID);
-    }
-
-    /**
-     * Test for embargo after expiry in the future
-     *
-     * No jobs should be created, invalid option
-     */
-    public function testFutureEmbargoAfterExpiry()
-    {
-        $page = $this->objFromFixture(SiteTree::class, 'futureEmbargoAfterExpiry');
-
-        $page = $this->finishWorkflow($page);
-
-        $this->assertEquals(0, $page->PublishJobID);
-        $this->assertEquals(0, $page->UnPublishJobID);
-    }
-
-    /**
-     * Test for embargo and expiry in the past, both have the same value
-     *
-     * No jobs should be created, invalid option
-     */
-    public function testPastSameEmbargoExpiry()
-    {
-        $page = $this->objFromFixture(SiteTree::class, 'pastSameEmbargoExpiry');
-
-        $page = $this->finishWorkflow($page);
-
-        $this->assertEquals(0, $page->PublishJobID);
-        $this->assertEquals(0, $page->UnPublishJobID);
-    }
-
-    /**
-     * Test for embargo and expiry in the future, both have the same value
-     *
-     * No jobs should be created, invalid option
-     */
-    public function testFutureSameEmbargoExpiry()
-    {
-        $page = $this->objFromFixture(SiteTree::class, 'futureSameEmbargoExpiry');
-
-        $page = $this->finishWorkflow($page);
-
-        $this->assertEquals(0, $page->PublishJobID);
-        $this->assertEquals(0, $page->UnPublishJobID);
-    }
-
-    /**
-     * When an item is queued for publishing or unpublishing and new dates are entered
-     *
-     * The existing queued jobs should be cleared
-     */
-    public function testDesiredRemovesJobs()
-    {
-        $page = $this->objFromFixture(SiteTree::class, 'futureEmbargoExpiry');
-
-        $page = $this->finishWorkflow($page);
-
-        $this->assertNotEquals(0, $page->PublishJobID);
-        $this->assertNotEquals(0, $page->UnPublishJobID);
-
-        $page->DesiredPublishDate = '2020-02-01 00:00:00';
-        $page->DesiredUnPublishDate = '2020-02-01 02:00:00';
-
+        // Jobs would ordinarily be queued at this time, but because we have a Workflow applied (in the fixture), we
+        // should halt that from happening.
         $page->write();
 
+        $this->assertNotNull($page->DesiredPublishDate);
+        $this->assertNotNull($page->DesiredUnPublishDate);
+        $this->assertNull($page->PublishOnDate);
+        $this->assertNull($page->UnPublishOnDate);
         $this->assertEquals(0, $page->PublishJobID);
         $this->assertEquals(0, $page->UnPublishJobID);
-    }
 
-    /**
-     * Tests that checking for publishing scheduled state is working
-     */
-    public function testIsPublishScheduled()
-    {
-        $page = SiteTree::create();
-        $page->Title = 'My page';
-        $page->PublishOnDate = '2010-01-01 00:00:00';
-        $page->AllowEmbargoedEditing = false;
-        $page->write();
-
-        $this->assertFalse($page->getIsPublishScheduled());
-
-        $page->PublishOnDate = '2016-02-01 00:00:00';
-        DBDatetime::set_mock_now('2016-01-16 00:00:00');
-        $this->assertTrue($page->getIsPublishScheduled());
-
-        DBDatetime::set_mock_now('2016-02-16 00:00:00');
-        $this->assertFalse($page->getIsPublishScheduled());
-    }
-
-    /**
-     * Tests that checking for un-publishing scheduled state is working
-     */
-    public function testIsUnPublishScheduled()
-    {
-        $page = SiteTree::create();
-        $page->Title = 'My page';
-        $page->PublishOnDate = '2010-01-01 00:00:00';
-        $page->AllowEmbargoedEditing = false;
-        $page->write();
-
-        $this->assertFalse($page->getIsUnPublishScheduled());
-
-        $page->UnPublishOnDate = '2016-02-01 00:00:00';
-        DBDatetime::set_mock_now('2016-01-16 00:00:00');
-        $this->assertTrue($page->getIsUnPublishScheduled());
-
-        DBDatetime::set_mock_now('2016-02-16 00:00:00');
-        $this->assertFalse($page->getIsUnPublishScheduled());
-    }
-
-    /**
-     * Tests that status flags (badges) are added properly for a page
-     */
-    public function testStatusFlags()
-    {
-        $page = SiteTree::create();
-        $page->Title = 'stuff';
-        DBDatetime::set_mock_now('2016-01-16 00:00:00');
-
-        $flags = $page->getStatusFlags(false);
-        $this->assertNotContains('embargo_expiry', array_keys($flags));
-        $this->assertNotContains('embargo', array_keys($flags));
-        $this->assertNotContains('expiry', array_keys($flags));
-
-        $page->PublishOnDate = '2016-02-01 00:00:00';
-        $page->UnPublishOnDate = null;
-        $flags = $page->getStatusFlags(false);
-        $this->assertNotContains('embargo_expiry', array_keys($flags));
-        $this->assertContains('embargo', array_keys($flags));
-        $this->assertNotContains('expiry', array_keys($flags));
-
-        $page->PublishOnDate = null;
-        $page->UnPublishOnDate = '2016-02-01 00:00:00';
-        $flags = $page->getStatusFlags(false);
-        $this->assertNotContains('embargo_expiry', array_keys($flags));
-        $this->assertNotContains('embargo', array_keys($flags));
-        $this->assertContains('expiry', array_keys($flags));
-
-        $page->PublishOnDate = '2016-02-01 00:00:00';
-        $page->UnPublishOnDate = '2016-02-08 00:00:00';
-        $flags = $page->getStatusFlags(false);
-        $this->assertContains('embargo_expiry', array_keys($flags));
-        $this->assertNotContains('embargo', array_keys($flags));
-        $this->assertNotContains('expiry', array_keys($flags));
-    }
-
-    /**
-     * Test workflow definition "Can disable edits during embargo"
-     * Make sure page cannot be edited when an embargo is in place
-     */
-    public function testCanEditConfig()
-    {
-        $this->logOut();
-
-        $page = SiteTree::create();
-        $page->Title = 'My page';
-        $page->PublishOnDate = '2010-01-01 00:00:00';
-        $page->write();
-
-        $memberID = $this->logInWithPermission('SITETREE_EDIT_ALL');
-        $this->assertTrue($page->canEdit(), 'Can edit page without embargo and no permission');
-
-        $page->PublishOnDate = '2020-01-01 00:00:00';
-        $page->AllowEmbargoedEditing = false;
-        $page->write();
-        $this->assertFalse($page->canEdit(), 'Cannot edit page with embargo and no permission');
-
-        $this->logOut();
-        $memberID = $this->logInWithPermission('ADMIN');
-        $this->assertTrue($page->canEdit(), 'Can edit page with embargo as Admin');
-
-        $this->logOut();
-        $memberID = $this->logInWithPermission(array('SITETREE_EDIT_ALL', 'EDIT_EMBARGOED_WORKFLOW'));
-        $this->assertTrue($page->canEdit(), 'Can edit page with embargo and permission');
-
-        $page->PublishOnDate = '2010-01-01 00:00:00';
-        $page->write();
-        $this->assertTrue($page->canEdit(), 'Can edit page without embargo and permission');
-    }
-
-    protected function createDefinition()
-    {
-        $definition = new WorkflowDefinition();
-        $definition->Title = 'Dummy Workflow Definition';
-        $definition->write();
-
-        $stepOne = new WorkflowAction();
-        $stepOne->Title = 'Step One';
-        $stepOne->WorkflowDefID = $definition->ID;
-        $stepOne->write();
-
-        $stepTwo = new WorkflowAction();
-        $stepTwo->Title = 'Step Two';
-        $stepTwo->WorkflowDefID = $definition->ID;
-        $stepTwo->write();
-
-        $transitionOne = new WorkflowTransition();
-        $transitionOne->Title = 'Step One T1';
-        $transitionOne->ActionID = $stepOne->ID;
-        $transitionOne->NextActionID = $stepTwo->ID;
-        $transitionOne->write();
-
-        return $definition;
-    }
-
-    /**
-     * Make sure that publish and unpublish dates are not carried over to the duplicates.
-     */
-    public function testDuplicateRemoveEmbargoExpiry()
-    {
-        $page = $this->objFromFixture(SiteTree::class, 'futureEmbargoExpiry');
-
-        // fake publish jobs
         $page = $this->finishWorkflow($page);
 
-        $dupe = $page->duplicate();
-        $this->assertNotNull($page->PublishOnDate, 'Not blank publish on date');
-        $this->assertNotNull($page->UnPublishOnDate, 'Not blank unpublish on date');
-        $this->assertNotEquals($page->PublishJobID, 0, 'Publish job ID still set');
-        $this->assertNotEquals($page->UnPublishJobID, 0, 'Unpublish job ID still set');
-        $this->assertNull($dupe->PublishOnDate, 'Blank publish on date');
-        $this->assertNull($dupe->UnPublishOnDate, 'Blank unpublish on date');
-        $this->assertEquals($dupe->PublishJobID, 0, 'Publish job ID unset');
-        $this->assertEquals($dupe->UnPublishJobID, 0, 'Unpublish job ID unset');
+        // Check that the Jobs have been created, and that the object fields were correctly updated.
+        $this->assertNull($page->DesiredPublishDate);
+        $this->assertNull($page->DesiredUnPublishDate);
+        $this->assertNotNull($page->PublishOnDate);
+        $this->assertNotNull($page->UnPublishOnDate);
+        $this->assertNotNull($page->PublishJob());
+        $this->assertNotNull($page->UnPublishJob());
+
+        // This record should not yet be published.
+        $this->assertFalse($page->isPublished());
+    }
+
+    /**
+     * Test when only an embargo date is set.
+     *
+     * A publish job should be created, and the page should not be published as part of the workflow action.
+     *
+     * No un-publish job should be created.
+     *
+     * @throws ValidationException
+     */
+    public function testProcessEmbargo()
+    {
+        /** @var SiteTree|EmbargoExpiryExtension $page */
+        $page = $this->objFromFixture(SiteTree::class, 'processEmbargo');
+
+        $page->Content = 'Content to go live';
+        $page->DesiredPublishDate = '2014-01-06 12:00:00';
+
+        // Jobs would ordinarily be queued at this time, but because we have a Workflow applied (in the fixture), we
+        // should halt that from happening.
+        $page->write();
+
+        $this->assertNotNull($page->DesiredPublishDate);
+        $this->assertNull($page->DesiredUnPublishDate);
+        $this->assertNull($page->PublishOnDate);
+        $this->assertNull($page->UnPublishOnDate);
+        $this->assertEquals(0, $page->PublishJobID);
+        $this->assertEquals(0, $page->UnPublishJobID);
+
+        $page = $this->finishWorkflow($page);
+
+        // Check that the Jobs have been created, and that the object fields were correctly updated.
+        $this->assertNull($page->DesiredPublishDate);
+        $this->assertNull($page->DesiredUnPublishDate);
+        $this->assertNotNull($page->PublishOnDate);
+        $this->assertNull($page->UnPublishOnDate);
+        $this->assertTrue($page->PublishJob()->exists());
+        $this->assertEquals(0, $page->UnPublishJobID);
+
+        // This record should not yet be published.
+        $this->assertFalse($page->isPublished());
+    }
+
+    /**
+     * Test when only an expiry date is set.
+     *
+     * An un-publish job should be created, and the page should not be published as part of the workflow action.
+     *
+     * No publish job should be created.
+     *
+     * @throws ValidationException
+     */
+    public function testProcessExpiry()
+    {
+        /** @var SiteTree|EmbargoExpiryExtension $page */
+        $page = $this->objFromFixture(SiteTree::class, 'processExpiry');
+
+        $page->Content = 'Content to go live';
+        $page->DesiredUnPublishDate = '2014-01-08 12:00:00';
+
+        // Jobs would ordinarily be queued at this time, but because we have a Workflow applied (in the fixture), we
+        // should halt that from happening.
+        $page->write();
+
+        $this->assertNull($page->DesiredPublishDate);
+        $this->assertNotNull($page->DesiredUnPublishDate);
+        $this->assertNull($page->PublishOnDate);
+        $this->assertNull($page->UnPublishOnDate);
+        $this->assertEquals(0, $page->PublishJobID);
+        $this->assertEquals(0, $page->UnPublishJobID);
+
+        $page = $this->finishWorkflow($page);
+
+        // Check that the Jobs have been created, and that the object fields were correctly updated.
+        $this->assertNull($page->DesiredPublishDate);
+        $this->assertNull($page->DesiredUnPublishDate);
+        $this->assertNull($page->PublishOnDate);
+        $this->assertNotNull($page->UnPublishOnDate);
+        $this->assertEquals(0, $page->PublishJobID);
+        $this->assertTrue($page->UnPublishJob()->exists());
+
+        // This record should not yet be published.
+        $this->assertFalse($page->isPublished());
     }
 }

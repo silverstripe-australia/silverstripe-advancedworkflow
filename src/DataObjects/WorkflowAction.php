@@ -15,6 +15,8 @@ use SilverStripe\ORM\DB;
 use SilverStripe\Security\Member;
 use SilverStripe\Security\Permission;
 use SilverStripe\Security\Security;
+use Symbiote\AdvancedWorkflow\Extensions\WorkflowEmbargoExpiryExtension;
+use Terraformers\EmbargoExpiry\Extension\EmbargoExpiryExtension;
 
 /**
  * A workflow action describes a the 'state' a workflow can be in, and
@@ -306,5 +308,25 @@ class WorkflowAction extends DataObject
     {
         $icon = $this->config()->get('icon');
         return ModuleResourceLoader::singleton()->resolveURL($icon);
+    }
+    /**
+     * @param DataObject $target
+     * @return bool
+     */
+    public function targetHasEmbargoExpiryModules($target)
+    {
+        if (!$target instanceof DataObject) {
+            return false;
+        }
+
+        if (!$target->hasExtension(EmbargoExpiryExtension::class)) {
+            return false;
+        }
+
+        if (!$target->hasExtension(WorkflowEmbargoExpiryExtension::class)) {
+            return false;
+        }
+
+        return true;
     }
 }

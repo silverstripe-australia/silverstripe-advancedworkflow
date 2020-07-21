@@ -17,37 +17,13 @@ Symbiote\AdvancedWorkflow\Actions\PublishItemWorkflowAction:
 SilverStripe\CMS\Model\SiteTree:
   emptyEmbargoExpiry:
     Title: 'Empty embargo and expiry'
-  pastEmbargo:
-    Title: 'Embargo in the past'
-    DesiredPublishDate: 2013-01-15
-  pastExpiry:
-    Title: 'Expiry in the past'
-    DesiredUnPublishDate: 2013-03-15
-  pastEmbargoExpiry:
-    Title: 'Embargo and expiry in the past'
-    DesiredPublishDate: 2013-01-15
-    DesiredUnPublishDate: 2013-03-15
-  pastEmbargoFutureExpiry:
-    Title: 'Embargo in the past and expiry in the future'
-    DesiredPublishDate: 2013-01-15
-    DesiredUnPublishDate: 2015-03-15
-  futureEmbargoExpiry:
-    Title: 'Embargo and expiry in the future'
-    DesiredPublishDate: 2015-01-15
-    DesiredUnPublishDate: 2015-03-15
-  pastEmbargoAfterExpiry:
-    Title: 'Embargo after expiry in the past'
-    DesiredPublishDate: 2013-03-15
-    DesiredUnPublishDate: 2013-01-15
-  futureEmbargoAfterExpiry:
-    Title: 'Embargo after expiry in the future'
-    DesiredPublishDate: 2015-03-15
-    DesiredUnPublishDate: 2015-01-15
-  pastSameEmbargoExpiry:
-    Title: 'Embargo and expiry are the same in the past'
-    DesiredPublishDate: 2013-01-15
-    DesiredUnPublishDate: 2013-01-15
-  futureSameEmbargoExpiry:
-    Title: 'Embargo and expiry are the same in the future'
-    DesiredPublishDate: 2015-01-15
-    DesiredUnPublishDate: 2015-01-15
+    WorkflowDefinitionID: =>Symbiote\AdvancedWorkflow\DataObjects\WorkflowDefinition.requestPublication
+  processEmbargoExpiry:
+    Title: 'Process embargo and expiry'
+    WorkflowDefinitionID: =>Symbiote\AdvancedWorkflow\DataObjects\WorkflowDefinition.requestPublication
+  processEmbargo:
+    Title: 'Process embargo'
+    WorkflowDefinitionID: =>Symbiote\AdvancedWorkflow\DataObjects\WorkflowDefinition.requestPublication
+  processExpiry:
+    Title: 'Process expiry'
+    WorkflowDefinitionID: =>Symbiote\AdvancedWorkflow\DataObjects\WorkflowDefinition.requestPublication
