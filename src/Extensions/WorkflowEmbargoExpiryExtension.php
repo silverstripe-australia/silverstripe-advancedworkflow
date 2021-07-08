@@ -299,6 +299,10 @@ class WorkflowEmbargoExpiryExtension extends DataExtension
         if (!$this->owner->ID) {
             return;
         }
+        
+        if ($this->owner->hasMethod('isPublishJobRunning') && $this->owner->isPublishJobRunning()) {
+            return;
+        }
 
         // Check requested dates of publish / unpublish, and whether the page should have already been unpublished
         $now = DBDatetime::now()->getTimestamp();
